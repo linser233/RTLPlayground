@@ -16,6 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         machine:
+          # ⚠️ 先确认 machine/ 目录下的实际文件名，替换这两项
           - SWGT024_V2_0
           - PCB_SWTG024AS_A_2_0_1
 
@@ -25,10 +26,14 @@ jobs:
       - name: Install dependencies
         run: |
           apt update
-          apt install make gcc sdcc xxd python-is-python3 libjson-c-dev zlib1g-dev -y
+          apt install make gcc sdcc xxd python-is-python3 \
+            libjson-c-dev zlib1g-dev git -y
           sdcc --version
 
-      # ---- 常规校验（只在第一个矩阵项跑一次即可）----
+      # 调试用：列出所有机型定义文件，方便核对 MACHINE 名字
+      - name: List available machines
+        run: ls -1 machine/*.c
+
       - name: Run the host-side unit tests
         if: matrix.machine == 'SWGT024_V2_0'
         run: make -C test
@@ -37,7 +42,6 @@ jobs:
         if: matrix.machine == 'SWGT024_V2_0'
         run: make machine_check
 
-      # ---- 编译标准固件（非 installer）----
       - name: Make project (${{ matrix.machine }})
         run: make clean && make CI=1 MACHINE="${{ matrix.machine }}"
 
@@ -47,7 +51,6 @@ jobs:
           cp output/rtlplayground.bin \
              artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
 
-      # ---- 编译 installer 固件 ----
       - name: Make installer (${{ matrix.machine }})
         run: |
           cd installer
@@ -58,15 +61,6 @@ jobs:
           cp installer/output/rtlplayground_oem_upgrade.bin \
              artifacts/${{ matrix.machine }}/rtlplayground_oem_upgrade-${{ matrix.machine }}.bin
 
-      # ---- 可选：带健康度仪表盘的调试固件 ----
-      # 如果不需要可以整块删掉
-      - name: Make project with health instrumentation
-        run: |
-          make clean && make CI=1 MACHINE="${{ matrix.machine }}" HEALTH=1
-          cp output/rtlplayground.bin \
-             artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}-HEALTH.bin
-
-      # ---- 上传 ----
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
