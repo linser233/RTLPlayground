@@ -1,54 +1,73 @@
-name: Build RTLPlayground Firmware
+name: Build firmware
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build ${{ matrix.machine }}
     runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+
     strategy:
       fail-fast: false
       matrix:
         machine:
-          - SWTG024AS
-          - SWTG024AS_V2_0
+          - SWGT024_V2_0
+          - PCB_SWTG024AS_A_2_0_1
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: actions/checkout@v6
 
-      # 构建 Docker 镜像（一次构建，本 job 内所有 step 复用）
-      - name: Build Docker image
+      - name: Install dependencies
         run: |
-          docker build -t rtlplayground-build .
+          apt update
+          apt install make gcc sdcc xxd python-is-python3 libjson-c-dev zlib1g-dev -y
+          sdcc --version
 
-      # 编译标准固件
-      - name: Build standard firmware
+      # ---- 常规校验（只在第一个矩阵项跑一次即可）----
+      - name: Run the host-side unit tests
+        if: matrix.machine == 'SWGT024_V2_0'
+        run: make -C test
+
+      - name: Check that every machine definition can be compiled
+        if: matrix.machine == 'SWGT024_V2_0'
+        run: make machine_check
+
+      # ---- 编译标准固件（非 installer）----
+      - name: Make project (${{ matrix.machine }})
+        run: make clean && make CI=1 MACHINE="${{ matrix.machine }}"
+
+      - name: Save standard firmware
         run: |
-          docker run --rm \
-            -v "$PWD:/workspace" -w /workspace \
-            rtlplayground-build \
-            bash -c "make clean && make MACHINE=${{ matrix.machine }}"
           mkdir -p artifacts/${{ matrix.machine }}
           cp output/rtlplayground.bin \
              artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
 
-      # 编译 installer 固件
-      - name: Build installer firmware
+      # ---- 编译 installer 固件 ----
+      - name: Make installer (${{ matrix.machine }})
         run: |
-          docker run --rm \
-            -v "$PWD:/workspace" -w /workspace/installer \
-            rtlplayground-build \
-            bash -c "make clean && make MACHINE=${{ matrix.machine }}"
+          cd installer
+          make clean && make CI=1 MACHINE="${{ matrix.machine }}"
+
+      - name: Save installer firmware
+        run: |
           cp installer/output/rtlplayground_oem_upgrade.bin \
              artifacts/${{ matrix.machine }}/rtlplayground_oem_upgrade-${{ matrix.machine }}.bin
 
-      - name: Upload artifacts
+      # ---- 可选：带健康度仪表盘的调试固件 ----
+      # 如果不需要可以整块删掉
+      - name: Make project with health instrumentation
+        run: |
+          make clean && make CI=1 MACHINE="${{ matrix.machine }}" HEALTH=1
+          cp output/rtlplayground.bin \
+             artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}-HEALTH.bin
+
+      # ---- 上传 ----
+      - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.machine }}
