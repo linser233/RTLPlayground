@@ -1,25 +1,9 @@
 name: Build RTLPlayground Firmware
 
 on:
-  # 手动触发，方便选择需要编译的机型
   workflow_dispatch:
-    inputs:
-      machines:
-        description: '选择要编译的机型（逗号分隔）'
-        required: true
-        default: 'SWTG024AS,SWTG024AS_V2_0'
-        type: string
-  # 每次 push 到 main 分支时自动编译全部机型
   push:
     branches: [ main ]
-  # 允许其他仓库或脚本调用
-  workflow_call:
-    inputs:
-      machines:
-        description: '机型列表'
-        required: false
-        type: string
-        default: 'SWTG024AS,SWTG024AS_V2_0'
 
 jobs:
   build:
@@ -28,59 +12,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 定义需要编译的机型，与 Makefile 中的 MACHINE 变量对应
         machine:
           - SWTG024AS
           - SWTG024AS_V2_0
 
     steps:
-      # 1. 检出代码
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          submodules: recursive   # RTLPlayground 依赖子模块
+          submodules: recursive
 
-      # 2. 安装编译依赖（SDCC 4.5+ 是关键）
-      - name: Install build dependencies
+      # 构建 Docker 镜像（一次构建，本 job 内所有 step 复用）
+      - name: Build Docker image
         run: |
-          sudo apt-get update
-          sudo apt-get install -y make gcc xxd python-is-python3 \
-            libjson-c-dev zlib1g-dev binutils
-          # Ubuntu 默认源的 SDCC 版本较旧，从官方 PPA 安装最新版
-          sudo add-apt-repository -y ppa:sdcc/sdcc
-          sudo apt-get update
-          sudo apt-get install -y sdcc
-          # 验证 SDCC 版本（需 >= 4.5）
-          sdcc --version
+          docker build -t rtlplayground-build .
 
-      # 3. 编译标准固件（非 installer 版本）
-      - name: Build standard firmware for ${{ matrix.machine }}
+      # 编译标准固件
+      - name: Build standard firmware
         run: |
-          make clean
-          make MACHINE=${{ matrix.machine }}
-          # 重命名输出文件，避免不同机型互相覆盖
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            rtlplayground-build \
+            bash -c "make clean && make MACHINE=${{ matrix.machine }}"
           mkdir -p artifacts/${{ matrix.machine }}
           cp output/rtlplayground.bin \
              artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
-          # 同时保留带版本信息的文件名（如果存在）
-          if [ -f output/rtlplayground-*.bin ]; then
-            cp output/rtlplayground-*.bin artifacts/${{ matrix.machine }}/
-          fi
 
-      # 4. 编译 installer 固件
-      - name: Build installer firmware for ${{ matrix.machine }}
+      # 编译 installer 固件
+      - name: Build installer firmware
         run: |
-          # installer 固件需要先编译标准固件，再进入 installer 目录处理
-          cd installer
-          make clean
-          make MACHINE=${{ matrix.machine }}
-          # 将 installer 输出也放入对应机型的 artifacts 目录
-          mkdir -p ../artifacts/${{ matrix.machine }}
-          cp output/rtlplayground_oem_upgrade.bin \
-             ../artifacts/${{ matrix.machine }}/rtlplayground_oem_upgrade-${{ matrix.machine }}.bin
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace/installer \
+            rtlplayground-build \
+            bash -c "make clean && make MACHINE=${{ matrix.machine }}"
+          cp installer/output/rtlplayground_oem_upgrade.bin \
+             artifacts/${{ matrix.machine }}/rtlplayground_oem_upgrade-${{ matrix.machine }}.bin
 
-      # 5. 上传编译产物（每个机型一个 artifact）
-      - name: Upload firmware artifacts
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.machine }}
