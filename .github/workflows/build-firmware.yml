@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         machine:
-          # ⚠️ 先确认 machine/ 目录下的实际文件名，替换这两项
-          - SWGT024_V2_0
           - PCB_SWTG024AS_A_2_0_1
+          - SWTG024AS_V2_0
+          - SWGT024_V2_0_MANAGED
 
     steps:
       - uses: actions/checkout@v6
@@ -30,31 +30,33 @@ jobs:
             libjson-c-dev zlib1g-dev git -y
           sdcc --version
 
-      # 调试用：列出所有机型定义文件，方便核对 MACHINE 名字
-      - name: List available machines
-        run: ls -1 machine/*.c
+      - name: Fix git ownership
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # 校验只跑一次，避免两个矩阵项重复执行
       - name: Run the host-side unit tests
-        if: matrix.machine == 'SWGT024_V2_0'
+        if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
         run: make -C test
 
       - name: Check that every machine definition can be compiled
-        if: matrix.machine == 'SWGT024_V2_0'
+        if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
         run: make machine_check
 
+      # ---- 标准固件 ----
       - name: Make project (${{ matrix.machine }})
-        run: make clean && make CI=1 MACHINE="${{ matrix.machine }}"
-
-      - name: Save standard firmware
         run: |
+          make clean || true
+          make CI=1 MACHINE="${{ matrix.machine }}"
           mkdir -p artifacts/${{ matrix.machine }}
           cp output/rtlplayground.bin \
              artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
 
+      # ---- installer 固件 ----
       - name: Make installer (${{ matrix.machine }})
         run: |
           cd installer
-          make clean && make CI=1 MACHINE="${{ matrix.machine }}"
+          make clean || true
+          make CI=1 MACHINE="${{ matrix.machine }}"
 
       - name: Save installer firmware
         run: |
