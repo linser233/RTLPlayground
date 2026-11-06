@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,40 +24,25 @@ jobs:
           - SWGT024_V2_0_MANAGED
 
     steps:
-      # ① 先安装 git，确保 checkout 会走真正的 git clone 而不是 REST 下载
-      - name: Install git & basic tools
+      # ⚠️ checkout 必须在前：容器里没 git → 走 REST 下载 → 不会触发 dubious ownership
+      - uses: actions/checkout@v4
+
+      # ⚠️ 装依赖必须在 checkout 之后：bzip2 / curl / ca-certificates 缺一不可
+      - name: Install dependencies
         run: |
           apt update
-          apt install -y git curl bzip2 ca-certificates
-
-      # ② 关键：在 checkout 之前，用 --system 作用域标记工作区为安全目录
-      - name: Mark workspace as safe directory (system-level)
-        run: |
-          git config --system --add safe.directory '*'
-          echo "safe.directory configured:"
-          git config --list --show-origin | grep -i safe || true
-
-      # ③ 现在 checkout 内部的 git 命令不会再报 dubious ownership
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          set-safe-directory: false   # 避免 checkout 自带的 global 配置与我们冲突
-
-      # ④ 其余构建依赖
-      - name: Install build dependencies
-        run: |
-          apt install -y make gcc sdcc xxd python-is-python3 \
-            libjson-c-dev zlib1g-dev
+          apt install make gcc g++ bison flex libboost-dev patch \
+            bzip2 curl ca-certificates xxd python-is-python3 \
+            libjson-c-dev zlib1g-dev -y
           sdcc --version
 
-      # ⑤ 验证 git 环境（诊断用）
-      - name: Verify git environment
-        run: |
-          git rev-parse --show-toplevel
-          git describe --tags --always || true
-          git config --list --show-origin | grep -i safe || true
+      - name: Cache the patched SDCC
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: sdcc-${{ hashFiles('sdcc/*') }}
 
-      # 校验只跑一次，避免矩阵项重复执行
+      # 校验只跑一次，避免三台机器重复执行
       - name: Run the host-side unit tests
         if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
         run: make -C test
@@ -63,8 +51,8 @@ jobs:
         if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
         run: make machine_check
 
-      # ---- 标准固件 ----
-      - name: Make project (${{ matrix.machine }})
+      # ---------- 标准固件 ----------
+      - name: Build firmware (${{ matrix.machine }})
         run: |
           make clean || true
           make CI=1 MACHINE="${{ matrix.machine }}"
@@ -72,8 +60,8 @@ jobs:
           cp output/rtlplayground.bin \
              artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
 
-      # ---- installer 固件 ----
-      - name: Make installer (${{ matrix.machine }})
+      # ---------- installer 固件 ----------
+      - name: Build installer (${{ matrix.machine }})
         run: |
           cd installer
           make clean || true
