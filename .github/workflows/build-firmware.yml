@@ -21,32 +21,38 @@ jobs:
           - SWGT024_V2_0_MANAGED
 
     steps:
-      # ① checkout 之前必须先有 git，否则 checkout 不生成 .git
-      - name: Install git & basic tools (needed by checkout)
+      # ① 先安装 git，确保 checkout 会走真正的 git clone 而不是 REST 下载
+      - name: Install git & basic tools
         run: |
           apt update
           apt install -y git curl bzip2 ca-certificates
 
-      # ② 现在 checkout 会真正 git clone，.git 目录存在
+      # ② 关键：在 checkout 之前，用 --system 作用域标记工作区为安全目录
+      - name: Mark workspace as safe directory (system-level)
+        run: |
+          git config --system --add safe.directory '*'
+          echo "safe.directory configured:"
+          git config --list --show-origin | grep -i safe || true
+
+      # ③ 现在 checkout 内部的 git 命令不会再报 dubious ownership
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0            # 让 git describe 能拿到 tag
-          set-safe-directory: false # 下面统一用 --system 配
+          fetch-depth: 0
+          set-safe-directory: false   # 避免 checkout 自带的 global 配置与我们冲突
 
-      # ③ 其余构建依赖
+      # ④ 其余构建依赖
       - name: Install build dependencies
         run: |
           apt install -y make gcc sdcc xxd python-is-python3 \
             libjson-c-dev zlib1g-dev
           sdcc --version
 
-      # ④ 容器内用 --system 作用域最可靠；通配符覆盖所有挂载目录
-      - name: Fix git ownership
+      # ⑤ 验证 git 环境（诊断用）
+      - name: Verify git environment
         run: |
-          git config --system --add safe.directory '*'
-          echo "== toplevel =="
-          git rev-parse --show-toplevel || true
+          git rev-parse --show-toplevel
           git describe --tags --always || true
+          git config --list --show-origin | grep -i safe || true
 
       # 校验只跑一次，避免矩阵项重复执行
       - name: Run the host-side unit tests
