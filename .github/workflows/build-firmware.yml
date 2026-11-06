@@ -22,16 +22,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0            # 让 make 里的 git describe 能拿到 tag
+          set-safe-directory: false # 不让 checkout 自己塞 safe.directory，下面统一管理
 
       - name: Install dependencies
         run: |
           apt update
           apt install make gcc sdcc xxd python-is-python3 \
-            libjson-c-dev zlib1g-dev git -y
+            libjson-c-dev zlib1g-dev git curl -y   # ← 加了 curl
           sdcc --version
 
       - name: Fix git ownership
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        run: |
+          git config --system --add safe.directory '*'  # ← --system + 通配符
+          echo "== safe.directory =="
+          git config --list --show-origin | grep -i safe || true
+          echo "== .git exists? =="
+          ls -la "$GITHUB_WORKSPACE/.git" 2>&1 | head -5 || true
 
       # 校验只跑一次，避免两个矩阵项重复执行
       - name: Run the host-side unit tests
