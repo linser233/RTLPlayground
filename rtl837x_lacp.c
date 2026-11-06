@@ -16,12 +16,13 @@
 #include "rtl837x_port.h"
 #include "uip.h"
 #include "machine.h"
+#include "timer.h"
 
 extern __code const struct machine machine;
 extern __xdata struct machine_runtime machine_detected;
 extern __xdata uint16_t management_vlan;
 extern __xdata struct uip_eth_addr uip_ethaddr;
-extern __xdata uint8_t uip_buf[UIP_CONF_BUFFER_SIZE + 2];
+extern __xdata uint8_t uip_buf[UIP_CONF_BUFFER_ALLOC_SIZE];
 
 /* 20-byte Actor/Partner information body (802.3ad 43.4.2.2), network byte order */
 struct lacp_info {
@@ -97,8 +98,7 @@ __xdata uint8_t  lacp_ntt[10];
 
 #define LACP_TICK_STEP	(SYS_TICK_HZ / 50)
 #define LACP_CATCH_UP	8
-__xdata uint8_t lacp_tick_last;
-extern volatile __xdata uint32_t ticks;
+static __xdata struct timer lacp_step_timer;
 
 __xdata uint16_t lacp_lag_ports[LACP_NUM_LAGS];
 __xdata uint8_t  lacp_port_lag[10];
@@ -165,7 +165,7 @@ void lacp_mux_update(void) __banked
 		if (!lacp_lag_ports[lag])
 			continue;
 		lacp_scratch_mask = 0;
-		for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+		for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 			if (lacp_port_lag[i] != lag)
 				continue;
 			if ((lacp_actor_state[i] & LACP_STATE_FULL) == LACP_STATE_FULL
@@ -248,7 +248,7 @@ void lacp_in(void) __banked
 		return;
 
 	port = ((uint8_t)HTONS(LACP_H->rtl_tag.pmask)) & 0x0f;
-	if (port < machine.min_port || port > machine.max_port)
+	if (!MACHINE_PORT_VALID(port))
 		return;
 
 	lag = lacp_port_lag[port];
@@ -298,7 +298,7 @@ void lacp_in(void) __banked
 
 static void lacp_step(void)
 {
-	for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+	for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 		if (lacp_port_lag[i] == LACP_LAG_NONE)
 			continue;
 
@@ -328,7 +328,7 @@ static void lacp_step(void)
 
 		if (!lacp_agg_valid[lag])
 			continue;
-		for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+		for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 			if (lacp_port_lag[i] == lag && lacp_rx_state[i] == LACP_RX_CURRENT
 			    && lacp_sys_eq(lacp_partner_sys[i], lacp_agg_sys[lag])) {
 				any_current = 1;
@@ -346,8 +346,8 @@ static void lacp_step(void)
 void lacp_timers(void) __banked
 {
 	uint8_t n = LACP_CATCH_UP;
-	while (n-- && TICKS_DUE(lacp_tick_last, LACP_TICK_STEP)) {
-		lacp_tick_last += LACP_TICK_STEP;
+	while (n-- && timer_expired(&lacp_step_timer)) {
+		timer_reset(&lacp_step_timer);
 		lacp_step();
 	}
 }
@@ -388,7 +388,7 @@ static uint8_t lacp_any_lag(void)
 
 static void lacp_engine_on(void)
 {
-	lacp_tick_last = (uint8_t)ticks;
+	timer_set(&lacp_step_timer, LACP_TICK_STEP);
 	lacpEnabled = 1;
 	trap_rma_set(RTL837X_RMA2_CONF, RTL837X_RMA_ACT_TRAP);
 }
@@ -422,7 +422,7 @@ void lacp_lag_set(uint8_t lag, __xdata uint16_t ports) __banked
 		return;
 	lacp_scratch_flag = lacp_any_lag();
 
-	for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+	for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 		if (lacp_port_lag[i] == lag && !(ports & PORT_BIT(i))) {
 			lacp_port_lag[i] = LACP_LAG_NONE;
 			lacp_port_release(i);
@@ -438,7 +438,7 @@ void lacp_lag_set(uint8_t lag, __xdata uint16_t ports) __banked
 	if (ports && !lacp_scratch_flag)
 		lacp_engine_on();
 
-	for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+	for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 		if (!(ports & PORT_BIT(i)))
 			continue;
 		lacp_scratch_lag = lacp_port_lag[i];
@@ -490,7 +490,7 @@ void lacp_show(void) __banked
 		print_string(" members "); print_short(lacp_members_last[l]); write_char('\n');
 	}
 
-	for (uint8_t i = machine.min_port; i <= machine.max_port; i++) {
+	for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++) {
 		print_string("port "); print_byte(machine.log_to_phys_port[i]);
 		print_string(" actor "); print_byte(lacp_actor_state[i]);
 		print_string(" partner "); print_byte(lacp_partner_state[i]);

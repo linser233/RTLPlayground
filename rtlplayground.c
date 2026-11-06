@@ -2,7 +2,6 @@
 #include <stdint.h>
 
 // #define REGDBG 1
-// #define RXTXDBG 1
 
 #include "rtl837x_sfr.h"
 #include "rtl837x_regs.h"
@@ -12,6 +11,7 @@
 #include "rtl837x_phy.h"
 #include "rtl837x_port.h"
 #include "rtl837x_trap.h"
+#include "rtl837x_nic.h"
 #include "rtl837x_stp.h"
 #include "rtl837x_lacp.h"
 #include "rtl837x_igmp.h"
@@ -31,6 +31,7 @@
 #include "syslog.h"
 #include "dns.h"
 #include "ntp.h"
+#include "timer.h"
 #include "httpd/page_impl.h"
 #include "boot.h"
 #include "sfp.h"
@@ -75,8 +76,6 @@ void crc16_bank1(__xdata uint8_t *v) __naked;
    - T_TIMER_DIV12_OVERFLOW = F_SYS / DIV12 / 1..65536 = 125MHz / 12 / 1..65536 = 10.42 MHz .. 158.9 Hz
    Selecting dividor 12 settings to get lowest timer tick posiable which is already high.
 */
-#define SYS_TICK_HZ 200
-
 #define TIMER2_DIV (CLOCK_HZ / 12 / SYS_TICK_HZ)
 #if TIMER2_DIV > 0xFFFF
 #error "SYS_TICK_HZ to low, must be >= 159"
@@ -92,16 +91,14 @@ __code const uint8_t netmask[] = { 255, 255, 255, 0};
 __xdata struct uip_eth_addr uip_ethaddr;
 
 volatile __xdata uint32_t ticks;
-volatile __xdata uint8_t sec_counter;
-volatile __xdata uint16_t sleep_ticks;
-__xdata uint8_t stp_tick_last;
 __xdata uint8_t arp_age_secs;
 extern __xdata struct dhcp_state dhcp_state;
 
-#define STP_TICK_STEP (SYS_TICK_HZ / STP_HZ)
 #define STP_CATCH_UP 8
 #define SFP_TICK_STEP 10
-__xdata uint8_t sfp_tick_last;
+static __xdata struct timer second;
+static __xdata struct timer sfp_poll;
+static __xdata struct timer delay_timer;
 
 /* Buffer for serial input, SBUF_SIZE must be power of 2 < 256
  * Writing to this buffer is under the sole control of the serial ISR
@@ -123,8 +120,8 @@ __code const uint8_t * __code const hex = "0123456789abcdef";
 __xdata uint8_t flash_buf[FLASH_BUF_SIZE];
 
 // NIC buffers for packet RX/TX
-__xdata uint8_t rx_headers[16]; // Packet header(s) on RX
-__xdata uint8_t uip_buf[UIP_CONF_BUFFER_SIZE+2];
+__xdata uint8_t rx_headers[16]; // RX descriptor
+__xdata uint8_t uip_buf[UIP_CONF_BUFFER_ALLOC_SIZE];
 
 __xdata uint16_t rx_packet_vlan;
 __xdata uint16_t management_vlan;
@@ -212,9 +209,6 @@ void isr_timer2(void) __interrupt(5)
 {
 	ticks++;
 	tick_pending = 1;
-	if (sleep_ticks > 0)
-		sleep_ticks--;
-	sec_counter++;
 
 	// Clear TF2 & EXF2 by software
 	T2CON &= ~0xC0;
@@ -304,6 +298,19 @@ void itoa(uint8_t v)
 	write_char('0' + (v % 10));
 }
 
+
+void itoa_no_syslog(uint8_t v)
+{
+	uint8_t t = (v / 100);
+	uint8_t print_zeros = t;
+	if (print_zeros)
+		write_char_no_syslog('0' + t);
+	t = (v / 10) % 10;
+	print_zeros |= t;
+	if (print_zeros)
+		write_char_no_syslog('0' + t);
+	write_char_no_syslog('0' + (v % 10));
+}
 
 /* Same as itoa(), one decade wider: enough for a port number. Kept separate
  * rather than widening itoa() itself, because every existing caller passes a
@@ -714,108 +721,6 @@ void get_random_32(void)
 }
 
 
-/*
- * Transfer Network Interface RX data from the ASIC to the 8051 XMEM
- * data will be stored in the rx_header structure
- * len is the length of data to be transferred
- */
-bool nic_rx_header(uint16_t ring_ptr)
-{
-	uint16_t buffer = (uint16_t) &rx_headers[0];
-	uint16_t guard = 0;
-
-	SFR_NIC_DATA_U16LE = buffer;
-	SFR_NIC_RING_U16LE = ring_ptr;
-	SFR_NIC_CTRL = 1;
-	while (SFR_NIC_CTRL != 0) {
-		if (++guard == 0) {
-			print_string("NIC: RX header transfer did not complete\n");
-			return false;
-		}
-	}
-	return true;
-}
-
-
-/*
- * Transfer Network Interface RX data from the ASIC to the 8051 XMEM
- * the description of the packet must be in the rx_headers data structure
- * data will be returned in the xmem buffer points to
- * ring_ptr is the current position of the RX Ring on the ASIC side
- */
-bool nic_rx_packet(uint16_t buffer, uint16_t ring_ptr)
-{
-	uint16_t guard = 0;
-
-	SFR_NIC_DATA_U16LE = buffer;
-	SFR_NIC_RING_U16LE = ring_ptr;
-
-	uint16_t len = (((uint16_t)rx_headers[5]) << 8) | rx_headers[4];
-	len += 7;
-	len >>= 3;
-#ifdef RXTXDBG
-	print_string(" len: ");
-	print_short(len);
-#endif
-	SFR_NIC_CTRL = len;
-	while (SFR_NIC_CTRL != 0) {
-		if (++guard == 0) {
-			print_string("NIC: RX transfer did not complete\n");
-			return false;
-		}
-	}
-	return true;
-}
-
-
-/*
- * Transfers data in XMEM to the ASIC for transmission by the nic
- */
-void nic_tx_packet(uint16_t ring_ptr)
-{
-	uint16_t len;
-	uint16_t guard = 0;
-
-	/* A frame that got a dot1Q tag was shifted forward over its padding, so it
-	 * starts at uip_buf and carries the q_frame layout. One that did not keeps
-	 * the padding in front and the nonq_frame layout, so the padding is skipped.
-	 */
-	if (frame_tagged) {
-		SFR_NIC_DATA_U16LE = (uint16_t) uip_buf;
-		len = FRAME_Q->len;
-		/*
-		(__xdata struct rtl_dot1q_frame *)uip_buf
-#define FRAME (((__xdata struct rtl_dot1q_frame *)&uip_buf[0]).nonq_frame)*/
-	} else {
-		SFR_NIC_DATA_U16LE = (uint16_t) uip_buf + VLAN_TAG_SIZE;
-		len = FRAME->len;
-	}
-
-#ifdef RXTXDBG
-	print_string("TX: \n");
-	for (uint8_t i = 0; i < 100; i++) {
-		print_byte(uip_buf[i]);
-		write_char(' ');
-	}
-	write_char('\n');
-#endif
-
-	ring_ptr <<= 3;
-	ring_ptr |= 0x8000;
-	SFR_NIC_RING_U16LE = ring_ptr;
-
-	len += 0xf;
-	len >>= 3;
-	SFR_NIC_CTRL = len;
-	while (SFR_NIC_CTRL != 0) {
-		if (++guard == 0) {
-			print_string("NIC: TX transfer did not complete\n");
-			return;
-		}
-	}
-}
-
-
 /* Read flash using the MMIO capabilities of the DW8051 core
  * Bank is < 0x3f and is the MSB
  * addr gives the address in the bank
@@ -961,8 +866,8 @@ void read_reg_timer(__xdata uint32_t * tmr)
 // Delay for given number of ticks without doing housekeeping
 void delay(uint16_t t)
 {
-	sleep_ticks = t;
-	while (sleep_ticks > 0)
+	timer_set(&delay_timer, t);
+	while (!timer_expired(&delay_timer))
 		PCON |= 1;
 }
 
@@ -999,8 +904,12 @@ void tcpip_output(void)
 	uint16_t ring_ptr = ((uint16_t)sfr_data[2]) << 8;
 	ring_ptr |= sfr_data[3];
 
-	// Move data over from xmem buffer to ASIC side using DMA
-	nic_tx_packet(ring_ptr);
+	// Move data over from xmem buffer to ASIC side using DMA. A VLAN-tagged
+	// frame starts at uip_buf; an untagged frame retains four bytes of padding.
+	if (frame_tagged)
+		nic_tx_packet(uip_buf, FRAME_Q->len, ring_ptr);
+	else
+		nic_tx_packet(uip_buf + VLAN_TAG_SIZE, FRAME->len, ring_ptr);
 
 	// New position of the ring-pointer on the NIC-side indicates number of bytes transmitted
 	reg_read_m(RTL837X_REG_NIC_TX_CURR_PKT);
@@ -1037,7 +946,7 @@ void handle_rx(void)
 			write_char(' ');
 		}
 #endif
-		if (!nic_rx_packet((uint16_t) &uip_buf[0], ring_ptr + 8)) {
+		if (!nic_rx_packet(uip_buf, ring_ptr + 8)) {
 			REG_SET(RTL837X_REG_NIC_RXCMD, 1);
 			return;
 		}
@@ -1240,8 +1149,8 @@ void check_links(void)
 //
 static void handle_tick(void)
 {
-	if (sec_counter >= SYS_TICK_HZ) {
-		sec_counter -= SYS_TICK_HZ;
+	if (timer_expired(&second)) {
+		timer_reset(&second);
 		reg_read_m(RTL837X_REG_SEC_COUNTER);
 		uint8_t v = sfr_data[3];
 #ifdef DEBUG
@@ -1283,8 +1192,8 @@ static void handle_tick(void)
 	}
 
 	health_phase(HEALTH_PH_LINK);
-	if (TICKS_DUE(sfp_tick_last, SFP_TICK_STEP)) {
-		sfp_tick_last += SFP_TICK_STEP;
+	if (timer_expired(&sfp_poll)) {
+		timer_reset(&sfp_poll);
 		handle_sfp();
 	}
 	health_phase(HEALTH_PH_SFP);
@@ -1292,8 +1201,8 @@ static void handle_tick(void)
 	health_phase(HEALTH_PH_TX);
 	if (stp_enabled) {
 		uint8_t n = STP_CATCH_UP;
-		while (n-- && TICKS_DUE(stp_tick_last, STP_TICK_STEP)) {
-			stp_tick_last += STP_TICK_STEP;
+		while (n-- && timer_expired(&stp_step)) {
+			timer_reset(&stp_step);
 			stp_timers();
 		}
 	}
@@ -1301,7 +1210,7 @@ static void handle_tick(void)
 		lacp_timers();
 	health_phase(HEALTH_PH_STP);
 	lldp_tick();
-	health_phase(HEALTH_LLDP);
+	health_phase(HEALTH_PH_LLDP);
 	cabletest_tick();
 }
 
@@ -1341,19 +1250,6 @@ void idle(void)
 		print_cmd_prompt();
 	}
 	health_phase(HEALTH_PH_CMD);
-}
-
-
-// Sleep the given number of ticks and perform idle tasks if initialized
-void sleep(uint16_t t)
-{
-	sleep_ticks = t;
-	while (sleep_ticks > 0) {
-		if (idle_ready)
-			idle();
-		else
-			PCON |= 1;
-	}
 }
 
 
@@ -1652,17 +1548,23 @@ void check_and_flash_update_image(void)
 }
 
 
+/* Called by the SDCC startup code before it copies XINIT to XISEG and clears XSEG.
+ * Hardware reset starts us with MAP_FLASH_PAGE_TO_XDATA = 1, which maps xdata
+ * 0x4000-0xbfff to the flash image (reads return flash, writes are lost), so it
+ * must be 0 by then. */
+unsigned char __sdcc_external_startup(void)
+{
+	MAP_FLASH_PAGE_TO_XDATA = 0;
+	return 0;
+}
 
 void main(void)
 {
 	ticks = 0;
-	stp_tick_last = (uint8_t)ticks;
-	sfp_tick_last = (uint8_t)ticks;
 	dhcp_state.state = DHCP_OFF;
 	sbuf_ptr = 0;
 
 	CKCON = 0;	// Initial Clock configuration
-	SFR_97 = 0;	// HADDR?
 
 	// Set in managed mode:
 	SFR_b9 = 0x00;
@@ -1684,7 +1586,7 @@ void main(void)
 	// Flash controller should be initialized before any code in other banks is being fetched
 	// See this issue: https://github.com/logicog/RTLPlayground/issues/70
 	print_string("\nInitializing Flash controller\n");
-	flash_init(1);
+	flash_init(machine.flash_sio ? 0 : 1);
 
 	// Set default for SFP pins so we can start up a module already inserted
 	sfp_pins_last = 0x33; // signal LOS and no module inserted (for both slots, even if only 1 present)
@@ -1838,6 +1740,8 @@ void main(void)
 	/* After the config: a name from it wins, otherwise derive one. */
 	set_hostname_default();
 	print_cmd_prompt();
+	timer_set(&second, SYS_TICK_HZ);
+	timer_set(&sfp_poll, SFP_TICK_STEP);
 	idle_ready = 1;
 
 	set_sys_led_state(SYS_LED_ON);

@@ -4,6 +4,11 @@
 #include <stdbool.h>
 
 extern __code const uint8_t * __code const HTTP_RESPONCE_TXT;
+extern __code const uint8_t * __code const HTTP_RESPONCE_JSON;
+
+void bool_to_html(char c);
+void byte_to_html(uint8_t val);
+void itoa_html(uint8_t v);
 
 void itoa16_html(uint16_t v);
 
@@ -22,9 +27,10 @@ void send_isolation(void);
 void send_config(void);
 void send_cmd_log(void);
 void send_lag(void);
-void send_stp(void);
+void send_stp(void) __banked;
 void send_lldp(void);
 void send_lacp(void);
+void send_stp_counters(void) __banked;
 void send_vlanlist(void);
 
 /*  Convert only the lower nibble to ascii HEX char.

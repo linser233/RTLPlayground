@@ -56,11 +56,18 @@ device simulator is provided, which runs entirely under Linux as a local webserv
 
 ## (0) Compiling Requirements
 
-Install the following particular build requisites (Debian 12/13), note that Ubuntu 24.04
-still has an older version of sdcc, but you will need sdcc version 4.5 for the code to compile:
+Install the following particular build requisites (Debian 12/13):
 ```
-sudo apt install make gcc sdcc xxd python-is-python3 libjson-c-dev zlib1g-dev
+sudo apt install make gcc g++ bison flex libboost-dev patch bzip2 curl xxd python-is-python3 libjson-c-dev zlib1g-dev
 ```
+
+The first `make` downloads SDCC 4.6.0, applies the fixes in `sdcc/` and builds it into
+`toolchain/`, which takes a few minutes. Later builds reuse it. The released SDCC 4.5.0
+and 4.6.0 miscompile parts of this code, see [SDCC bug #4153](https://sourceforge.net/p/sdcc/bugs/4153/)
+and [#4154](https://sourceforge.net/p/sdcc/bugs/4154/); both fixes are in SDCC trunk since
+r17039. The third patch is for [#4070](https://sourceforge.net/p/sdcc/bugs/4070/), where the
+assembler drops the top byte of a `__sfr32` address list; it is proposed upstream and lets
+`SFR_DATA_U32` be used again. To use an SDCC you installed yourself instead, run `make CC=sdcc ...`.
 
 <details>
 <summary>If using Docker (click to expand)</summary>
@@ -90,17 +97,25 @@ docker run --rm -v $(pwd):/workspace rtlplayground-dev make MACHINE=DEFAULT_8C_1
 
 The resulting `.bin` file appears in `output/` on your host.
 
+Build the OEM web upgrade bin (after building the firmware bin)
+
+```
+docker run --rm -v $(pwd):/workspace rtlplayground-dev make -C installer
+```
+
+The resulting `rtlplayground_oem_upgrade.bin` file appears in `installer/output/` on your host.
+
 Build host tools only:
 
 ```
 docker run --rm -v $(pwd):/workspace rtlplayground-dev make -C tools
 ```
 
-Run the web-interface simulator locally:
+Run the web-interface simulator through docker:
 
 ```
-docker run --rm -p 8080:8080 -v $(pwd):/workspace rtlplayground-dev \
-  tools/output/httpd_sim /workspace/html
+docker run --rm -p 8081:8081 -v $(pwd):/workspace rtlplayground-dev \
+  tools/output/httpd_sim.py /workspace/html
 ```
 
 Edit `config.txt` on your host, then re-run `make` — the
@@ -119,6 +134,13 @@ make MACHINE=DEFAULT_8C_1SFP
 The name selects the board definition `machine/<name>.c`; `make` without a
 `MACHINE` value stops with an error listing what is expected. If your board is
 not in the list yet, see [Adding a new device](doc/adding-a-device.md).
+
+To embed a machine-specific startup configuration, pass `CONFIG`:
+```
+make MACHINE=DEFAULT_8C_1SFP CONFIG=configs/DEFAULT_8C_1SFP.txt
+```
+`CONFIG` defaults to `config.txt`; the selected file is embedded in the image
+and changing it triggers a rebuild.
 
 > [!TIP]
 > You can write configuration parameters in config.txt (see below) in order your switch to get
@@ -163,9 +185,9 @@ example of compilation console output
 RTLPlayground/installer$ make
 mkdir -p output
 gcc updatebuilder.c -o output/updatebuilder
-sdas8051 -plosgff -o output/crtstart.rel crtstart.asm
-sdcc -mmcs51 --code-loc 0x1000 -o output/installer.rel -c installer.c
-sdcc -mmcs51 -Wl-bHOME=0x1100 -Wl-r -o output/rtlinstaller.ihx output/crtstart.rel output/installer.rel
+../toolchain/sdcc-3390765201/bin/sdas8051 -plosgff -o output/crtstart.rel crtstart.asm
+../toolchain/sdcc-3390765201/bin/sdcc -mmcs51 --code-loc 0x1000 -o output/installer.rel -c installer.c
+../toolchain/sdcc-3390765201/bin/sdcc -mmcs51 -Wl-bHOME=0x1100 -Wl-r -o output/rtlinstaller.ihx output/crtstart.rel output/installer.rel
 ./output/updatebuilder -i output/rtlinstaller.ihx -o output/rtlplayground_oem_upgrade.bin ../output/rtlplayground.bin
 Input file size: 524288
 Bytes read: 524288
@@ -349,13 +371,37 @@ netmask zzz.zzz.zzz.zzz = Network mask of the switch
 port x name xxx         = Name xxx the port number x
 port z 1g               = Set 1g speed for port z
 igmp on/off             = Turn IGMP on or off
-session xxxx            = Web session timeout in seconds (default 200)
+session xxxx            = Web session timeout in seconds (default 3600)
 ```
 [To be continue]
 
 Enjoy playing!
 
-## (11) Other documents
+## (13) HTTP Simulator for front-end development
+
+The simulator is available in tools as `./httpd_sim.py`
+By default it will serve the content in the current working directory so the easiest way to run this is to:
+```
+cd ./html
+../tools/httpd_sim.py
+```
+And the simulator will be available on http://127.0.0.1:8081
+
+There are commandline options available:
+```
+usage: httpd_sim.py [-h] [--machine MACHINE] [--port PORT] [--bindaddr BINDADDR] [--verbose]
+
+options:
+  -h, --help           show this help message and exit
+  --machine MACHINE    path to machine.c or .h file to parse (optional)
+  --port PORT          port to bind to (default 8081)
+  --bindaddr BINDADDR  address to bind (default 127.0.0.1)
+  --verbose            enable verbose output
+```
+
+The machine parsing is somewhat experimental.
+
+## (12) Other documents
 
 The following documents give further documentation on specific features of the RTL837x SoCs:
 - [Adding a new device](doc/adding-a-device.md)

@@ -14,8 +14,9 @@
 #include "uip.h"
 #include "rtl837x_flash.h"
 #include "syslog.h"
+#include "dhcp.h"
 #include "rtl837x_phy.h"
-#include "support.h"
+#include <test/support.h>
 #include "rtl837x_lacp.h"
 
 /* ---- console: everything lands in out_buf (support.c) ---- */
@@ -57,15 +58,16 @@ const uint8_t hex_chars[] = "0123456789abcdef";
 uint8_t *hex = (uint8_t *)hex_chars;
 
 /* ---- a 9-port RTL8373 whose logical ports map to themselves ---- */
+#ifndef RTLP_TEST_IS8373
+#define RTLP_TEST_IS8373 1
+#endif
 const struct machine machine = {
 	.machine_name = "HOSTTEST",
-	.min_port = 0,
-	.max_port = 8,
 	.n_sfp = 0,
 	.log_to_phys_port = { 1, 2, 3, 4, 5, 6, 7, 8, 9 },
 	.phys_to_log_port = { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
 };
-struct machine_runtime machine_detected = { .isRTL8373 = 1 };
+struct machine_runtime machine_detected = { .isRTL8373 = RTLP_TEST_IS8373 };
 
 /* ---- firmware state the modules read or write ---- */
 uint8_t  outbuf[TCP_OUTBUF_SIZE];
@@ -84,6 +86,7 @@ char     hostname[24] = "hosttest";
 char     port_names[9][PORT_NAME_SIZE];
 struct flash_region_t flash_region;
 struct syslog_state syslog_state;
+struct dhcp_state dhcp_state;
 bool     stp_enabled;
 bool lldp_enabled;
 uint16_t lldp_logical_port_status;
@@ -120,6 +123,12 @@ uint8_t  stp_pflags[STP_ENTITIES];
 uint8_t  stp_pp2p[STP_ENTITIES];
 uint8_t  stp_pprio[STP_ENTITIES];
 uint8_t  stp_prio = 0x80, stp_root_port = 0xff, stp_rstp = 1, stp_txhold = 6;
+uint8_t  stp_bpdu_filter, stp_pcost_short, stp_root_fwd = 15, stp_root_maxage = 20;
+uint16_t stp_legacy, stp_link_prev = 0x3ff;
+uint16_t stp_info_while[STP_ENTITIES];
+uint32_t stp_cnt[STP_CNT_N][STP_ENTITIES];
+uint32_t stp_tc_secs;
+uint8_t  stp_ent_id(uint8_t e) { return e >= STP_LAG_BASE ? e + 101 - STP_LAG_BASE : machine.log_to_phys_port[e]; }
 
 /* ---- SFP: no module present, reads fail ---- */
 uint8_t sfp_buf[16];

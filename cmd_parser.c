@@ -24,6 +24,7 @@
 #include "sfp.h"
 #include "dhcp.h"
 #include "syslog.h"
+#include "sessions.h"
 #include "dns.h"
 #include "ntp.h"
 #include "uip/uip.h"
@@ -266,7 +267,7 @@ uint8_t cmd_parse_port(uint8_t idx) {
 		return 0;
 
 	port = machine.phys_to_log_port[port];
-	if (port < machine.min_port || port > machine.max_port)
+	if (!MACHINE_PORT_VALID(port))
 		return 0;
 
 	atoi_results_u8 = port;
@@ -633,9 +634,15 @@ void parse_vlan(void)
 		vlan_settings.vlan = atoi_results_short;
 
 		if (cmd_compare(2, "mgmt")) {
+			if (management_vlan == vlan_settings.vlan) {
+				print_string("Management VLAN unchanged\n");
+				return;
+			}
 			port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, true);
 			management_vlan = vlan_settings.vlan;
 			port_l2_static_mgmt(uip_ethaddr.addr, management_vlan, false);
+			if (dhcp_state.state != DHCP_OFF)
+				dhcp_start();
 			if (!vlan_settings.vlan)
 				print_string("Management VLAN disabled\n");
 			else
@@ -743,7 +750,7 @@ void parse_isolate(void)
     }
 
 	if (cmd_compare(2, "off")) {
-		for (uint8_t i = machine.min_port; i <= machine.max_port; i++)
+		for (uint8_t i = MACHINE_MIN_PORT; i <= MACHINE_MAX_PORT; i++)
 			members |= ((uint16_t)1) << i;
 		members |= PMASK_CPU; // CPU-port
 		port_isolate(port_configured, members);
@@ -797,7 +804,7 @@ void parse_ingress(void)
 		if (!cmd_is_space_or_nul(idx))
 			goto err;
 		// Setting mode for all ports at once
-		for (log_port = machine.min_port; log_port <= machine.max_port; log_port++) {
+		for (log_port = MACHINE_MIN_PORT; log_port <= MACHINE_MAX_PORT; log_port++) {
 			if (!port_ingress_filter(log_port, mode)) {
 				cmd_error("cannot set the ingress filter for port "); print_phys_port(log_port); write_char('\n');
 				return;
@@ -849,7 +856,7 @@ void parse_mirror(void)
 			print_string("NOT Enabled: ");
 		}
 		print_string("Mirroring port: ");
-		print_phys_port(mirroring_port);
+		print_phys_port(mPort >> 1);
 		reg_read_m(RTL837x_MIRROR_CONF);
 		uint16_t m = sfr_data[0];
 		m = (m << 8) | sfr_data[1];
@@ -944,6 +951,8 @@ void parse_port(void)
 		print_string("\"\n");
 	} else if (cmd_compare(2, "lldp")) {
 		if (cmd_compare(3, "block")){
+			if (lldp_enabled)
+				lldp_shutdown((uint16_t)1 << phy_settings.port);
 			lldp_logical_port_status &= ~((uint16_t)1 << phy_settings.port);
 		} else if (cmd_compare(3, "permit")) {
 			lldp_logical_port_status |= (uint16_t)1 << phy_settings.port;
@@ -1019,7 +1028,7 @@ void parse_mtu(void)
 	uint8_t p;
 
 	if (cmd_compare(1, "show")) {
-		for (p = machine.min_port; p <= machine.max_port; p++) {
+		for (p = MACHINE_MIN_PORT; p <= MACHINE_MAX_PORT; p++) {
 			reg_read_m(RTL8373_REG_MAC_L2_PORT_MAX_LEN + ((uint16_t) p << 8));
 			uint16_t mtu = SFR_DATA_U16 & 0x3fff;
 			print_string("Port "); print_phys_port(p);
@@ -1479,6 +1488,9 @@ void parse_passwd(void)
 			passwd[j++] = c;
 		} while (c != NUL && j < 20);
 		passwd[j] = NUL;
+		/* Logins made with the old password end here. With one session the next
+		 * login pushed a leftover one out; with several it would stay valid. */
+		session_init();
 		return;
 	}
 	cmd_error("Missing password\n");
@@ -1836,6 +1848,8 @@ void print_gpio_status(void) {
 void print_sw_version(void) __banked {
 	print_string("Software version: " VERSION_SW);
 	print_string("\nBuild date: " BUILD_DATE);
+	print_string("\nCompiler: SDCC " STR(__SDCC_VERSION_MAJOR) "." STR(__SDCC_VERSION_MINOR) "." STR(__SDCC_VERSION_PATCH) " #" STR(__SDCC_REVISION));
+	print_string("\nToolchain: " SDCC_TOOLCHAIN);
 	print_string("\nHardware: ");
 	print_string(machine.machine_name);
 	write_char('\n');
@@ -1863,6 +1877,10 @@ void cmd_parser(void) __banked
 	if (cmd_words_len >= 1) {
 		if (cmd_compare(0, "reset")) {
 			print_string("\nRESET\n\n");
+			reset_chip();
+		} else if (cmd_compare(0, "factory-reset")) {
+			print_string("\nFACTORY RESET\n\n");
+			flash_default_config();
 			reset_chip();
 		} else if (cmd_compare(0, "sfp")) {
 			parse_sfp();
@@ -2011,10 +2029,10 @@ void cmd_parser(void) __banked
 				cmd_error("lacp (show | off); a group starts LACP with: lag <1-4> lacp <port>...\n");
 		} else if (cmd_compare(0, "pvid")) {
 			if (cmd_words_len == 3 && cmd_parse_port_separator(cmd_words_b[1]) != 0
-			    && atoi_short(cmd_words_b[2]) && atoi_results_short && atoi_results_short <= 4094)
+			    && atoi_short(cmd_words_b[2]) && atoi_results_short <= 4094)
 				port_pvid_set(atoi_results_u8, atoi_results_short);
 			else {
-				cmd_error("pvid <port> <1-4094>\n");
+				cmd_error("pvid <port> <0-4094>\n");
 			}
 		} else if (cmd_compare(0, "vlan")) {
 			parse_vlan();
@@ -2083,6 +2101,8 @@ void cmd_parser(void) __banked
 				trap_rma_set(RTL837X_RMA0E_CONF, RTL837X_RMA_ACT_TRAP);
 			} else {
 				print_string("LLDP disabled\n");
+				if (lldp_enabled)
+					lldp_shutdown(lldp_logical_port_status);
 				lldp_enabled = 0;
 				trap_rma_set(RTL837X_RMA0E_CONF, RTL837X_RMA_ACT_FORWARD);
 			}
@@ -2329,6 +2349,7 @@ void health_show(void) __banked
 	ph_line("tx  ", HEALTH_PH_TX);
 	ph_line("stp ", HEALTH_PH_STP);
 	ph_line("cmd ", HEALTH_PH_CMD);
+	ph_line("lldp", HEALTH_PH_LLDP);
 
 	/* Stack: current depth plus how much of the painted area is untouched */
 	print_string("sp ");
