@@ -18,58 +18,95 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        machine:
-          - PCB_SWTG024AS_A_2_0_1
-          - SWTG024AS_V2_0
-          - SWGT024_V2_0_MANAGED
+        # board 是 bank_occupancy.sh 需要的短名；如脚本对短名有其它约定，请自行调整
+        include:
+          - machine: PCB_SWTG024AS_A_2_0_1
+            board: SWTG024AS
+          - machine: SWGT024_V2_0_MANAGED
+            board: SWGT024
 
     steps:
-      # ⚠️ checkout 必须在前：容器里没 git → 走 REST 下载 → 不会触发 dubious ownership
+      # 参考原作者：branch 与 main 分开 checkout，
+      # 既避开容器里 git 的 dubious ownership，也方便后面做 main 对照
       - uses: actions/checkout@v4
+        with:
+          path: branch
 
-      # ⚠️ 装依赖必须在 checkout 之后：bzip2 / curl / ca-certificates 缺一不可
+      - uses: actions/checkout@v4
+        with:
+          path: main
+          ref: main
+
       - name: Install dependencies
         run: |
           apt update
-          apt install make gcc g++ bison flex libboost-dev patch \
+          apt install make gcc g++ pkg-config bison flex libboost-dev patch \
             bzip2 curl ca-certificates xxd python-is-python3 \
             libjson-c-dev zlib1g-dev -y
 
       - name: Cache the patched SDCC
         uses: actions/cache@v4
         with:
-          path: toolchain
-          key: sdcc-${{ hashFiles('sdcc/*') }}
+          path: branch/toolchain
+          key: sdcc-${{ hashFiles('branch/sdcc/*') }}
 
-      # 校验只跑一次，避免三台机器重复执行
+      # 校验只跑一次，避免两台机器重复执行
       - name: Run the host-side unit tests
         if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
-        run: make -C test
+        run: cd branch && make -C test
 
       - name: Check that every machine definition can be compiled
         if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
-        run: make machine_check
+        run: cd branch && make machine_check
 
       # ---------- 标准固件 ----------
       - name: Build firmware (${{ matrix.machine }})
         run: |
+          cd branch
           make clean || true
           make CI=1 MACHINE="${{ matrix.machine }}"
-          mkdir -p artifacts/${{ matrix.machine }}
+          mkdir -p ../artifacts/${{ matrix.machine }} /tmp/branch
           cp output/rtlplayground.bin \
-             artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
+             ../artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
+          # 为后面和 main 对照保存中间产物
+          # ⚠️ 如果你们的 Makefile 输出到 output/<MACHINE>/ 下，这里要改成对应路径
+          cp output/rtlplayground.map output/rtlplayground.mem /tmp/branch/ 2>/dev/null || true
+          cp -r output/html_min /tmp/branch/ 2>/dev/null || true
 
-      # ---------- installer 固件 ----------
-      - name: Build installer (${{ matrix.machine }})
+      # ---------- health 验证构建 ----------
+      - name: Build firmware with the health instrumentation (${{ matrix.machine }})
         run: |
-          cd installer
+          cd branch
+          make clean
+          make CI=1 MACHINE="${{ matrix.machine }}" HEALTH=1
+
+      # ---------- debug 验证构建 ----------
+      - name: Build firmware with the debug output (${{ matrix.machine }})
+        run: |
+          cd branch
+          make clean
+          make CI=1 MACHINE="${{ matrix.machine }}" DEBUG=1
+
+      # ---------- 用 main 做对照（只跑一次，复用 branch 的 SDCC） ----------
+      - name: Build main for comparison
+        if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
+        run: |
+          rm -rf main/toolchain
+          ln -s ../branch/toolchain main/toolchain
+          export PATH="$(echo "$PWD"/branch/toolchain/sdcc-*/bin):$PATH"
+          cd main
           make clean || true
           make CI=1 MACHINE="${{ matrix.machine }}"
+          mkdir -p /tmp/main
+          cp output/rtlplayground.map output/rtlplayground.mem /tmp/main/ 2>/dev/null || true
+          cp -r output/html_min /tmp/main/ 2>/dev/null || true
 
-      - name: Save installer firmware
+      # ---------- 计算 bank 增长（只跑一次） ----------
+      - name: Calculate bank growth
+        if: matrix.machine == 'PCB_SWTG024AS_A_2_0_1'
         run: |
-          cp installer/output/rtlplayground_oem_upgrade.bin \
-             artifacts/${{ matrix.machine }}/rtlplayground_oem_upgrade-${{ matrix.machine }}.bin
+          bash branch/tools/bank_occupancy.sh ${{ matrix.board }} /tmp/main /tmp/branch \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
