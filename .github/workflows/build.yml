@@ -57,7 +57,7 @@ jobs:
           # 日志里的实际文件名（去掉 .c）替换下面的占位名
           MACHINES="
           HISOURCE_HI_K0402WS_PCB_K0402W_V3_0
-          SWGT024_V20
+          SWGT024_V2_0_MANAGED
           PCB_SWTG024AS_A_2_0_1
           "
 
