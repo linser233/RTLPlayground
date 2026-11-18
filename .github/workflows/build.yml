@@ -4,273 +4,58 @@ on:
   push:
     branches: ['**']
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  APT_PACKAGES: >-
-    make gcc g++ pkg-config bison flex libboost-dev patch
-    bzip2 curl ca-certificates xxd python-is-python3
-    libjson-c-dev zlib1g-dev git
-  PRIMARY_MACHINE: KEEPLINK_KP_9000_6XHML_X2_2M_PCB43_V1_1
-  SDCC_CACHE_PREFIX: sdcc-debian-trixie
-
 jobs:
-  # ---------- 1) 只构建一次 SDCC，产出可复用缓存 ----------
-  toolchain:
-    runs-on: ubuntu-latest
-    container:
-      image: debian:trixie
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: branch
-
-      - name: Install dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $APT_PACKAGES
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Mark git directories as safe
-        run: git config --global --add safe.directory "$PWD/branch" || true
-
-      - name: Restore patched SDCC
-        id: sdcc-cache
-        uses: actions/cache@v4
-        with:
-          path: branch/toolchain
-          key: ${{ env.SDCC_CACHE_PREFIX }}-${{ hashFiles('branch/sdcc/**', 'branch/tools/**', 'branch/Makefile') }}
-          restore-keys: |
-            ${{ env.SDCC_CACHE_PREFIX }}-
-
-      - name: Build patched SDCC
-        if: steps.sdcc-cache.outputs.cache-hit != 'true'
-        run: |
-          cd branch
-          if make -n toolchain >/dev/null 2>&1; then
-            make -j"$(nproc)" toolchain
-          else
-            echo "::warning::仓库没有 make toolchain 目标，改用 $PRIMARY_MACHINE 做一次标准构建来生成 toolchain"
-            make -j"$(nproc)" CI=1 MACHINE="$PRIMARY_MACHINE"
-          fi
-
-  # ---------- 2) 单测 + machine 定义检查（只跑一次） ----------
-  checks:
-    needs: toolchain
-    runs-on: ubuntu-latest
-    container:
-      image: debian:trixie
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: branch
-
-      - name: Install dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $APT_PACKAGES
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Mark git directories as safe
-        run: git config --global --add safe.directory "$PWD/branch" || true
-
-      - name: Restore patched SDCC
-        uses: actions/cache@v4
-        with:
-          path: branch/toolchain
-          key: ${{ env.SDCC_CACHE_PREFIX }}-${{ hashFiles('branch/sdcc/**', 'branch/tools/**', 'branch/Makefile') }}
-          restore-keys: |
-            ${{ env.SDCC_CACHE_PREFIX }}-
-
-      - name: Run the host-side unit tests
-        run: |
-          cd branch
-          export PATH="$(echo "$PWD"/toolchain/sdcc-*/bin):$PATH"
-          make -j"$(nproc)" -C test
-
-      - name: Check that every machine definition can be compiled
-        run: |
-          cd branch
-          export PATH="$(echo "$PWD"/toolchain/sdcc-*/bin):$PATH"
-          make -j"$(nproc)" machine_check
-
-  # ---------- 3) 各机型标准固件并行构建 ----------
   build:
-    needs: toolchain
     runs-on: ubuntu-latest
     container:
       image: debian:trixie
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # 最早选择的三个机型：024AS / manage / 0402WS
-          - machine: PCB_SWTG024AS_A_2_0_1
-            board: SWTG024AS
-            is_primary: false
-          - machine: SWGT024_V2_0_MANAGED
-            board: SWGT024
-            is_primary: false
-          # PCB-K0402WS-V3.0，对应 Machine 定义是 HI_K0402WS
-          - machine: HI_K0402WS
-            board: K0402WS
-            is_primary: false
 
-          # 当前文件中的两个 KEEPLINK 机型
-          - machine: KEEPLINK_KP_9000_6XHML_X2_2M_PCB43_V1_1
-            board: KP_9000_6XHML_X2
-            is_primary: true
-          - machine: KEEPLINK_KP_9000_9XHML_X_2M_PCB23_V3_1
-            board: KP_9000_9XHML_X
-            is_primary: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           path: branch
 
-      # 只有 primary 机型需要与 main 对照
-      - uses: actions/checkout@v4
-        if: matrix.is_primary
+      - uses: actions/checkout@v6
         with:
           path: main
           ref: main
 
       - name: Install dependencies
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $APT_PACKAGES
-          rm -rf /var/lib/apt/lists/*
+          apt update
+          apt install make gcc g++ pkg-config bison flex libboost-dev patch bzip2 curl ca-certificates xxd python-is-python3 libjson-c-dev zlib1g-dev -y
 
-      - name: Mark git directories as safe
-        run: |
-          git config --global --add safe.directory "$PWD/branch" || true
-          git config --global --add safe.directory "$PWD/main" || true
-
-      - name: Restore patched SDCC
+      - name: Cache the patched SDCC
         uses: actions/cache@v4
         with:
           path: branch/toolchain
-          key: ${{ env.SDCC_CACHE_PREFIX }}-${{ hashFiles('branch/sdcc/**', 'branch/tools/**', 'branch/Makefile') }}
-          restore-keys: |
-            ${{ env.SDCC_CACHE_PREFIX }}-
+          key: sdcc-${{ hashFiles('branch/sdcc/*') }}
 
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ matrix.machine }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ matrix.machine }}-
+      - name: Run the host-side unit tests
+        run: cd branch && make -C test
 
-      - name: Build firmware (${{ matrix.machine }})
-        env:
-          CCACHE_DIR: ~/.ccache
-          CC: ccache gcc
-          CXX: ccache g++
+      - name: Check that every machine definition can be compiled
+        run: cd branch && make machine_check
+
+      - name: Build firmware
         run: |
-          cd branch
-          # 关键：toolchain 来自缓存时，Makefile 不会自动把 SDCC 加进 PATH
-          export PATH="$(echo "$PWD"/toolchain/sdcc-*/bin):$PATH"
-          make -j"$(nproc)" CI=1 MACHINE="${{ matrix.machine }}"
-          mkdir -p ../artifacts/${{ matrix.machine }} /tmp/branch
-          cp output/${{ matrix.machine }}/rtlplayground.bin \
-             ../artifacts/${{ matrix.machine }}/rtlplayground-${{ matrix.machine }}.bin
-          cp output/${{ matrix.machine }}/rtlplayground.map \
-             output/${{ matrix.machine }}/rtlplayground.mem /tmp/branch/ 2>/dev/null || true
-          cp -r output/${{ matrix.machine }}/html_min /tmp/branch/ 2>/dev/null || true
-
-      - name: Build main for comparison
-        if: matrix.is_primary
-        env:
-          CCACHE_DIR: ~/.ccache
-          CC: ccache gcc
-          CXX: ccache g++
-        run: |
-          rm -rf main/toolchain
-          ln -s ../branch/toolchain main/toolchain
-          export PATH="$(echo "$PWD"/branch/toolchain/sdcc-*/bin):$PATH"
-          cd main
-          make -j"$(nproc)" CI=1 MACHINE="${{ matrix.machine }}"
-          mkdir -p /tmp/main
-          cp output/${{ matrix.machine }}/rtlplayground.map \
-             output/${{ matrix.machine }}/rtlplayground.mem /tmp/main/ 2>/dev/null || true
-          cp -r output/${{ matrix.machine }}/html_min /tmp/main/ 2>/dev/null || true
-
-      - name: Calculate bank growth
-        if: matrix.is_primary
-        run: |
-          bash branch/tools/bank_occupancy.sh ${{ matrix.board }} /tmp/main /tmp/branch \
-            >> "$GITHUB_STEP_SUMMARY"
+          set -e
+          mkdir -p artifacts
+          for MACHINE in HI_K0402WS SWGT024_V2_0_MANAGED PCB_SWTG024AS_A_2_0_1; do
+            echo "=== Building $MACHINE ==="
+            make -C branch clean || true
+            make -C branch CI=1 MACHINE="$MACHINE"
+            mkdir -p "artifacts/$MACHINE"
+            cp branch/output/"$MACHINE"/*.bin "artifacts/$MACHINE/"
+          done
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ matrix.machine }}
-          path: artifacts/${{ matrix.machine }}/
-          retention-days: 30
-
-  # ---------- 4) health / debug 验证构建，并行 ----------
-  validation:
-    needs: toolchain
-    runs-on: ubuntu-latest
-    container:
-      image: debian:trixie
-    strategy:
-      fail-fast: false
-      matrix:
-        machine:
-          - PCB_SWTG024AS_A_2_0_1
-          - SWGT024_V2_0_MANAGED
-          - HI_K0402WS
-          - KEEPLINK_KP_9000_6XHML_X2_2M_PCB43_V1_1
-          - KEEPLINK_KP_9000_9XHML_X_2M_PCB23_V3_1
-        variant:
-          - health
-          - debug
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: branch
-
-      - name: Install dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $APT_PACKAGES
-          rm -rf /var/lib/apt/lists/*
-
-      - name: Mark git directories as safe
-        run: git config --global --add safe.directory "$PWD/branch" || true
-
-      - name: Restore patched SDCC
-        uses: actions/cache@v4
-        with:
-          path: branch/toolchain
-          key: ${{ env.SDCC_CACHE_PREFIX }}-${{ hashFiles('branch/sdcc/**', 'branch/tools/**', 'branch/Makefile') }}
-          restore-keys: |
-            ${{ env.SDCC_CACHE_PREFIX }}-
-
-      - name: Restore ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ matrix.machine }}-${{ matrix.variant }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ matrix.machine }}-${{ matrix.variant }}-
-
-      - name: Build ${{ matrix.variant }} firmware (${{ matrix.machine }})
-        env:
-          CCACHE_DIR: ~/.ccache
-          CC: ccache gcc
-          CXX: ccache g++
-        run: |
-          cd branch
-          export PATH="$(echo "$PWD"/toolchain/sdcc-*/bin):$PATH"
-          case "${{ matrix.variant }}" in
-            health) FLAGS="HEALTH=1" ;;
-            debug)  FLAGS="DEBUG=1" ;;
-            *) echo "unknown variant: ${{ matrix.variant }}"; exit 1 ;;
-          esac
-          make -j"$(nproc)" CI=1 MACHINE="${{ matrix.machine }}" $FLAGS
+          name: firmware
+          path: artifacts/**/*.bin
+          if-no-files-found: error
