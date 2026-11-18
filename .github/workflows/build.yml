@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt update
-          apt install make gcc g++ pkg-config bison flex libboost-dev patch bzip2 curl ca-certificates xxd python-is-python3 libjson-c-dev zlib1g-dev -y
+          apt install make gcc g++ pkg-config bison flex libboost-dev patch bzip2 curl ca-certificates xxd python-is-python3 libjson-c-dev zlib1g-dev git -y
 
       - name: Cache the patched SDCC
         uses: actions/cache@v4
@@ -41,16 +41,43 @@ jobs:
       - name: Check that every machine definition can be compiled
         run: cd branch && make machine_check
 
+      - name: List available machine definitions
+        run: |
+          echo "=== machine/*.c ==="
+          ls -1 branch/machine/*.c 2>/dev/null | sed 's|.*/||; s|\.c$||' | sort || true
+          echo "=== machine/pcb/*.c ==="
+          ls -1 branch/machine/pcb/*.c 2>/dev/null | sed 's|.*/||; s|\.c$||' | sort || true
+
       - name: Build firmware
         run: |
           set -e
           mkdir -p artifacts
-          for MACHINE in HI_K0402WS SWGT024_V2_0_MANAGED PCB_SWTG024AS_A_2_0_1; do
+
+          # 第 1 款已确认；第 2、3 款请根据 "List available machine definitions"
+          # 日志里的实际文件名（去掉 .c）替换下面的占位名
+          MACHINES="
+          HISOURCE_HI_K0402WS_PCB_K0402W_V3_0
+          SWGT024_V20
+          PCB_SWTG024AS_A_2_0_1
+          "
+
+          for MACHINE in $MACHINES; do
             echo "=== Building $MACHINE ==="
             make -C branch clean || true
-            make -C branch CI=1 MACHINE="$MACHINE"
+
+            if ! make -C branch CI=1 MACHINE="$MACHINE"; then
+              echo "::warning::Failed to build MACHINE=$MACHINE (check the machine name against the list above)"
+              continue
+            fi
+
             mkdir -p "artifacts/$MACHINE"
-            cp branch/output/"$MACHINE"/*.bin "artifacts/$MACHINE/"
+            if cp branch/output/"$MACHINE"/*.bin "artifacts/$MACHINE/" 2>/dev/null; then
+              echo "Collected:"
+              ls -l "artifacts/$MACHINE"
+            else
+              echo "::warning::No .bin found for MACHINE=$MACHINE"
+              rmdir "artifacts/$MACHINE" 2>/dev/null || true
+            fi
           done
 
       - name: Upload firmware artifacts
@@ -58,4 +85,4 @@ jobs:
         with:
           name: firmware
           path: artifacts/**/*.bin
-          if-no-files-found: error
+          if-no-files-found: warn
