@@ -59,7 +59,7 @@ jobs:
           HISOURCE_HI_K0402WS_PCB_K0402W_V3_0
           SWGT024_V2_0_MANAGED
           PCB_SWTG024AS_A_2_0_1
-          F7005_2_5GPOE_V1_0
+          RUIYING_RY_5GT_1SX
           "
 
           for MACHINE in $MACHINES; do
