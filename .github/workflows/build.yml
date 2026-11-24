@@ -60,6 +60,7 @@ jobs:
           SWGT024_V2_0_MANAGED
           PCB_SWTG024AS_A_2_0_1
           RUIYING_RY_5GT_1SX
+          RUIYING_RY_4GT_2SX
           "
 
           for MACHINE in $MACHINES; do
